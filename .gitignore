@@ -1,0 +1,38 @@
+# ==========================================
+# R
+# ==========================================
+.Rhistory
+.Rdata
+.RData
+.Ruserdata
+.Rproj.user/
+*.Rproj
+.Renviron
+*_cache/
+*_files/
+*.knit.md
+*.utf8.md
+
+# ==========================================
+# Python
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+venv/
+env/
+.env/
+.venv/
+.ipynb_checkpoints/
+
+# ==========================================
+# Sistema y editores
+# ==========================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.log
+*.tmp
