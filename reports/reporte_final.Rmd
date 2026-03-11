@@ -1,1 +1,81 @@
+---
+title: "Regresión Lineal Múltiple - Precios de Vivienda en Bogotá"
+author: "Felipe y Juan"
+date: "2026-03-11"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
 
+# Paquetes y datos
+```{r packages}
+library(jsonlite)
+library(tidyverse)
+library(car)
+library(lmtest)
+library(corrplot)
+```
+```{r cargar-datos}
+df <- fromJSON("../data/raw/apartments.json")
+glimpse(df)
+```
+#exploración de Datos
+```{r tipos-variables}
+sapply(df, class)
+```
+#Seleccion de variables
+```{r ver-tipos}
+sapply(df[, c("precio_venta", "area", "estrato", "tipo_propiedad", 
+              "localidad", "sector", "barrio", "banos", "habitaciones", 
+              "parqueaderos", "conjunto_cerrado", "administracion",
+              "distancia_estacion_tm_m", "distancia_parque_m", "antiguedad")], class)
+```
+```{r limpieza}
+df_clean <- df %>%
+  mutate(
+    # Convertir listas a valores simples
+    precio_venta = as.numeric(precio_venta),
+    estrato = as.numeric(estrato),
+    banos = as.numeric(banos),
+    habitaciones = as.numeric(habitaciones),
+    parqueaderos = as.numeric(parqueaderos),
+    conjunto_cerrado = as.numeric(conjunto_cerrado),
+    administracion = as.numeric(administracion),
+    sector = as.character(sector),
+    barrio = as.character(barrio),
+    antiguedad = as.character(antiguedad)
+  ) %>%
+  # Filtrar solo ventas con datos válidos
+  filter(
+    tipo_operacion == "VENTA",
+    !is.na(precio_venta),
+    !is.na(area),
+    !is.na(estrato),
+    precio_venta > 0,
+    area > 0
+  )
+
+cat("Registros originales:", nrow(df), "\n")
+cat("Registros después de limpieza:", nrow(df_clean), "\n")
+```
+#Estadisticas Descriptivas
+```{r descriptivas}
+df_clean %>%
+  select(precio_venta, area, estrato, banos, habitaciones,
+         parqueaderos, administracion, distancia_estacion_tm_m,
+         distancia_parque_m) %>%
+  summary()
+```
+
+#Graficos
+```{r scatter-precio-vs-area}
+ggplot(df_clean, aes(x = area, y = precio_venta)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "lm", se = TRUE, color = "blue") +
+  geom_smooth(method = "loess", se = FALSE, color = "red", linetype = "dashed") +
+  labs(title = "Precio de Venta vs Área",
+       subtitle = "Azul: lineal | Rojo: no lineal (loess)",
+       x = "Área (m²)", y = "Precio de Venta (COP)") +
+  theme_minimal()
+```
