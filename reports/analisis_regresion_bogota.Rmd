@@ -1,0 +1,743 @@
+---
+title: "Determinantes del Precio de Inmuebles en Bogotá"
+author: "Análisis de Regresión 2026-1"
+date: "2026-03-14"
+output:
+  rmdformats::downcute
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Introducción
+
+Este reporte analiza los determinantes del precio de venta de inmuebles en Bogotá, Colombia,
+usando un modelo de regresión lineal múltiple. La pregunta de investigación es:
+
+> **¿Qué características de un inmueble explican en mayor medida su precio de venta en Bogotá?**
+
+Los datos fueron recolectados mediante web scraping de portales inmobiliarios colombianos en 2023
+y están disponibles en Kaggle (`juandavsnchez/real-estatehousing-colombia-bogota`). El dataset
+original contiene 585 observaciones; tras eliminar registros con valores faltantes en variables
+clave, se trabaja con **551 inmuebles**.
+
+Las **unidades estadísticas** son inmuebles individuales (apartamentos, casas y casas en conjunto
+cerrado) ofertados en el mercado bogotano durante el año 2023.
+
+# Paquetes y datos
+
+```{r paquetes}
+
+
+library(MASS)       
+library(readr)
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)  
+library(car)        
+library(lmtest)     
+library(sandwich)  
+library(nortest)   
+library(tseries)    
+library(corrplot)   
+```
+
+```{r carga-datos}
+df_raw <- read_csv("properties.csv")
+
+summary(df_raw)
+```
+
+## Limpieza y preparación de datos 
+
+```{r limpieza}
+df <- df_raw %>%
+  dplyr::select(-conjunto, -direccion, -nombre, -descripcion, -barrio) %>%
+  # Convertir cadenas vacías a NA antes de filtrar
+  mutate(
+    remodelado = na_if(remodelado, ""),
+    gas        = na_if(gas, "")
+  ) %>%
+  filter(!is.na(estrato), !is.na(remodelado), !is.na(gas)) %>%
+  mutate(
+    remodelado    = ifelse(remodelado  == "Si",  1L, 0L),
+    # deposito ya viene como '0'/'1' en el CSV, no como 'Si'/'No'
+    deposito      = as.integer(deposito),
+    porteria      = ifelse(porteria    == "24 hrs", 1L, 0L),
+    zona_lav      = ifelse(zona_de_lavanderia == "Comunal", 1L, 0L),
+    gas           = ifelse(gas         == "Si",  1L, 0L),
+    parqueadero   = ifelse(parqueadero == "Si",  1L, 0L),
+    casa          = ifelse(tipo_de_inmueble == "Casa", 1L, 0L),
+    casa_conjunto = ifelse(tipo_de_inmueble == "casa con conjunto cerrado", 1L, 0L),
+    log_precio    = log(precio)
+  ) %>%
+  dplyr::select(-zona_de_lavanderia, -tipo_de_inmueble)
+
+cat( nrow(df), "\n")
+```
+
+## Variables del modelo
+
+- `log_precio`: logaritmo natural del precio de venta en COP — **variable dependiente**.
+- `area`: metros cuadrados del inmueble.
+- `habitaciones`: número de habitaciones.
+- `banos`: número de baños.
+- `garajes`: número de garajes.
+- `administracion`: cuota mensual de administración (COP).
+- `antiguedad`: años de construcción.
+- `elevadores`: número de ascensores en el edificio.
+- `estrato`: estrato socioeconómico (1 al 6).
+- `remodelado`, `deposito`, `porteria`, `zona_lav`, `gas`, `parqueadero`: variables binarias (0/1).
+- `casa`, `casa_conjunto`: dummies de tipo de inmueble (referencia: Apartamento).
+
+```{r renombrar-columnas}
+df <- df %>%
+  rename(
+    area           = `área`,
+    banos          = `baños`,
+    administracion = `administración`
+  )
+```
+
+```{r estadisticas-descriptivas}
+df %>%
+  dplyr::select(precio, log_precio, area, habitaciones, banos, garajes,
+                administracion, antiguedad, elevadores, estrato) %>%
+  summary()
+```
+
+---
+
+# Análisis Exploratorio de los Datos
+
+## Distribución de la variable dependiente
+
+```{r dist-precio, fig.width=10, fig.height=4}
+par(mfrow = c(1, 2))
+
+hist(df$precio / 1e6,
+     main = "Distribución del Precio",
+     xlab = "Precio (millones COP)",
+     ylab = "Frecuencia",
+     col  = "#2C5F8A", border = "white", breaks = 35)
+
+qqnorm(df$precio, main = "Q-Q Plot: Precio", pch = 20, col = "#2C5F8A")
+qqline(df$precio, col = "#C0392B", lwd = 2)
+
+par(mfrow = c(1, 1))
+```
+
+```{r dist-logprecio, fig.width=10, fig.height=4}
+par(mfrow = c(1, 2))
+
+hist(df$log_precio,
+     main = "Distribución de log(Precio)",
+     xlab = "log(Precio)",
+     ylab = "Frecuencia",
+     col  = "#E07B39", border = "white", breaks = 35)
+
+qqnorm(df$log_precio, main = "Q-Q Plot: log(Precio)", pch = 20, col = "#E07B39")
+qqline(df$log_precio, col = "#C0392B", lwd = 2)
+
+par(mfrow = c(1, 1))
+```
+
+Se aplica la prueba de Shapiro-Wilk para contrastar formalmente la normalidad:
+
+```{r shapiro-precio}
+set.seed(42)
+idx <- sample(1:nrow(df), 300)
+
+cat("Precio original:\n")
+print(shapiro.test(df$precio[idx]))
+
+cat("\nlog(Precio):\n")
+print(shapiro.test(df$log_precio[idx]))
+```
+
+```{r scatter-area, fig.width=7, fig.height=4}
+ggplot(df, aes(x = area, y = log_precio)) +
+  geom_point(alpha = 0.4, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) vs. Área",
+       x = "Área (m²)", y = "log(Precio)") +
+  theme_bw()
+```
+
+Se observa una relación lineal positiva entre el área y el precio: a mayor superficie,
+mayor precio de venta. La nube de puntos es bastante homogénea, lo que sugiere que la
+relación lineal es una buena aproximación.
+
+```{r scatter-estrato, fig.width=7, fig.height=4}
+ggplot(df, aes(x = estrato, y = log_precio)) +
+  geom_point(alpha = 0.4, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) vs. Estrato",
+       x = "Estrato socioeconómico", y = "log(Precio)") +
+  theme_bw()
+```
+
+El estrato presenta una de las correlaciones más altas con el precio. Cada nivel adicional
+de estrato se asocia con un incremento sustancial en el precio, reflejando las diferencias
+socioeconómicas espaciales de Bogotá.
+
+```{r scatter-banos-garajes, fig.width=10, fig.height=4}
+p1 <- ggplot(df, aes(x = banos, y = log_precio)) +
+  geom_point(alpha = 0.4, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) vs. Baños",
+       x = "Número de baños", y = "log(Precio)") +
+  theme_bw()
+
+p2 <- ggplot(df, aes(x = garajes, y = log_precio)) +
+  geom_point(alpha = 0.4, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) vs. Garajes",
+       x = "Número de garajes", y = "log(Precio)") +
+  theme_bw()
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+Tanto baños como garajes muestran relaciones lineales positivas claras con el precio.
+Los garajes tienen una pendiente especialmente pronunciada, dado el alto valor del parqueo
+en Bogotá.
+
+```{r scatter-admin-antiguedad, fig.width=10, fig.height=4}
+p3 <- ggplot(df, aes(x = administracion, y = log_precio)) +
+  geom_point(alpha = 0.4, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) vs. Administración",
+       x = "Cuota de administración (COP)", y = "log(Precio)") +
+  theme_bw()
+
+p4 <- ggplot(df, aes(x = antiguedad, y = log_precio)) +
+  geom_point(alpha = 0.4, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) vs. Antigüedad",
+       x = "Años de construcción", y = "log(Precio)") +
+  theme_bw()
+
+grid.arrange(p3, p4, ncol = 2)
+```
+
+La administración presenta una relación positiva pero con alta dispersión en valores
+extremos. La antigüedad muestra una relación positiva débil.
+
+## Validación de relaciones lineales vs. no lineales
+
+Para detectar si alguna variable presenta una relación no lineal con `log_precio`,
+se superponen la recta de regresión lineal (**roja**) y una curva LOESS no paramétrica
+(**azul punteada**). Si ambas coinciden, la relación es lineal; si la curva LOESS se
+desvía de la recta, hay evidencia de no linealidad.
+
+```{r lineal-vs-nolineal, fig.width=12, fig.height=10}
+vars_check <- c("area", "banos", "garajes", "administracion",
+                "antiguedad", "elevadores", "estrato")
+
+plots_nl <- lapply(vars_check, function(xv) {
+  ggplot(df, aes(x = .data[[xv]], y = log_precio)) +
+    geom_point(alpha = 0.3, size = 1, color = "gray60") +
+    geom_smooth(method = "lm",    formula = y ~ x, se = FALSE,
+                color = "#C0392B", linewidth = 1.2, linetype = "solid") +
+    geom_smooth(method = "loess", formula = y ~ x, se = FALSE,
+                color = "#2C5F8A", linewidth = 1.2, linetype = "dashed") +
+    labs(title = paste("log(Precio) ~", xv),
+         x = xv, y = "log(Precio)",
+         caption = "Rojo: lineal  |  Azul: LOESS") +
+    theme_bw(base_size = 9)
+})
+
+grid.arrange(grobs = plots_nl, ncol = 3)
+```
+
+La curva LOESS sigue de cerca la recta lineal en `area`, `estrato`, `banos` y `garajes`,
+confirmando relaciones esencialmente lineales. En `administracion` y `antiguedad` se
+observan pequeñas desviaciones en los extremos, pero sin patrones sistemáticos que
+invaliden el supuesto de linealidad. En conclusión, **no se requieren términos cuadráticos
+ni transformaciones adicionales** en las variables explicativas.
+
+## Validación de transformaciones de variables
+
+Se evalúa si las variables con mayor dispersión se benefician de una transformación
+logarítmica, comparando la escala original versus la escala logarítmica.
+
+```{r transformaciones, fig.width=12, fig.height=5}
+p_area_orig <- ggplot(df, aes(x = area, y = log_precio)) +
+  geom_point(alpha = 0.3, size = 1, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) ~ área (original)",
+       x = "Área (m²)", y = "log(Precio)") +
+  theme_bw()
+
+p_area_log <- ggplot(df, aes(x = log(area), y = log_precio)) +
+  geom_point(alpha = 0.3, size = 1, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) ~ log(área)",
+       x = "log(Área)", y = "log(Precio)") +
+  theme_bw()
+
+df_adm <- df %>% filter(administracion > 0)
+
+p_adm_orig <- ggplot(df_adm, aes(x = administracion, y = log_precio)) +
+  geom_point(alpha = 0.3, size = 1, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) ~ administración (original)",
+       x = "Administración (COP)", y = "log(Precio)") +
+  theme_bw()
+
+p_adm_log <- ggplot(df_adm, aes(x = log(administracion), y = log_precio)) +
+  geom_point(alpha = 0.3, size = 1, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) ~ log(administración)",
+       x = "log(Administración)", y = "log(Precio)") +
+  theme_bw()
+
+grid.arrange(p_area_orig, p_area_log, p_adm_orig, p_adm_log, ncol = 4)
+```
+
+Para `area`, la relación en escala original ya es lineal; `log(area)` produce una nube
+ligeramente más compacta. Para `administracion`, la versión log reduce la dispersión
+producida por valores extremos. Sin embargo, dado que los VIF son bajos y la relación
+lineal es aceptable, **se mantienen ambas variables en escala original** para preservar
+la interpretabilidad directa de los coeficientes.
+
+## Gráficos de dispersión entre variables explicativas
+
+```{r scatter-entre-x, fig.width=10, fig.height=8}
+df %>%
+  dplyr::select(area, banos, garajes, administracion, antiguedad,
+                elevadores, estrato) %>%
+  pairs(pch = 20, col = adjustcolor("#2C5F8A", alpha.f = 0.3),
+        main = "Dispersión entre variables explicativas numéricas")
+```
+
+Se observan asociaciones positivas moderadas entre `area` y `banos` (inmuebles más
+grandes tienen más baños), entre `garajes` y `estrato` (estratos altos tienen más
+garajes), y entre `administracion` y `estrato`. Ninguna correlación supera 0.8, lo que
+anticipa la ausencia de multicolinealidad grave entre los predictores.
+
+## Matriz de correlaciones
+
+```{r correlaciones, fig.width=7, fig.height=7}
+vars_num <- c("log_precio", "area", "banos", "garajes",
+              "administracion", "antiguedad", "elevadores", "estrato")
+
+corr_mat <- cor(df %>% dplyr::select(all_of(vars_num)), use = "complete.obs")
+
+par(mar = c(0, 0, 2, 0))
+corrplot(corr_mat,
+         method      = "color",
+         type        = "upper",
+         addCoef.col = "black",
+         number.cex  = 0.75,
+         tl.col      = "black",
+         tl.srt      = 45,
+         col         = colorRampPalette(c("#C0392B", "white", "#2C5F8A"))(200))
+title("Correlaciones de Pearson")
+```
+
+Las correlaciones más altas con `log_precio` corresponden a `estrato` (r = 0.82),
+`area` (r = 0.81), `garajes` (r = 0.81) y `banos` (r = 0.72).
+
+---
+
+# Estimación de Modelos, Ajuste y Validación
+
+## Usar para el reporte 
+
+$$
+\log(\text{precio}_i) = \beta_0 + \beta_1\,X_{1i} + \beta_2\,X_{2i} + \cdots + \beta_k\,X_{ki} + \varepsilon_i, \quad \varepsilon_i \sim \mathcal{N}(0, \sigma^2)
+$$
+
+## Modelo 0: Precio sin transformar
+### Este lo usamos de referencia
+
+$$
+\text{precio}_i = \beta_0 + \beta_1\,\text{area}_i + \cdots + \beta_k\,X_{ki} + \varepsilon_i
+$$
+
+```{r m0}
+m0 <- lm(precio ~ area + habitaciones + banos + garajes + administracion +
+           antiguedad + elevadores + estrato +
+           remodelado + deposito + porteria + zona_lav + gas +
+           parqueadero + casa + casa_conjunto,
+         data = df)
+
+summary(m0)
+```
+
+### Validación de supuestos — Modelo 0
+
+```{r supuestos-m0, fig.width=10, fig.height=8}
+par(mfrow = c(2, 2))
+plot(m0, main = "Diagnóstico — Modelo 0 (precio)")
+par(mfrow = c(1, 1))
+```
+
+```{r tests-m0}
+res_m0 <- residuals(m0)
+set.seed(42)
+idx_m0 <- sample(seq_along(res_m0), 300)
+
+cat("=== Normalidad ===\n")
+cat("\nShapiro-Wilk:\n")
+print(shapiro.test(res_m0[idx_m0]))
+
+cat("\nJarque-Bera:\n")
+print(tseries::jarque.bera.test(res_m0))
+
+cat("\nAnderson-Darling:\n")
+print(nortest::ad.test(res_m0))
+
+cat("\n=== Homocedasticidad ===\n")
+cat("\nBreusch-Pagan:\n")
+print(lmtest::bptest(m0))
+
+cat("\n=== Independencia de errores ===\n")
+cat("\nDurbin-Watson:\n")
+print(lmtest::dwtest(m0))
+```
+
+El Modelo 0 viola los supuestos de normalidad (p < 0.001) y homocedasticidad (p < 0.001),
+por lo que **sus inferencias son inválidas**. Se confirma la necesidad de la transformación
+logarítmica.
+
+
+## Modelo 1: log(precio) — Modelo completo
+
+$$
+\log(\text{precio}_i) = \beta_0 + \beta_1\,\text{area}_i + \beta_2\,\text{habitaciones}_i + \beta_3\,\text{banos}_i + \beta_4\,\text{garajes}_i + \beta_5\,\text{administracion}_i \\
++ \beta_6\,\text{antiguedad}_i + \beta_7\,\text{elevadores}_i + \beta_8\,\text{estrato}_i + \beta_9\,\text{remodelado}_i + \beta_{10}\,\text{deposito}_i \\
++ \beta_{11}\,\text{porteria}_i + \beta_{12}\,\text{zona\_lav}_i + \beta_{13}\,\text{gas}_i + \beta_{14}\,\text{parqueadero}_i + \beta_{15}\,\text{casa}_i + \beta_{16}\,\text{casa\_conjunto}_i + \varepsilon_i
+$$
+
+```{r m1}
+m1 <- lm(log_precio ~ area + habitaciones + banos + garajes + administracion +
+           antiguedad + elevadores + estrato +
+           remodelado + deposito + porteria + zona_lav + gas +
+           parqueadero + casa + casa_conjunto,
+         data = df)
+
+summary(m1)
+```
+
+### Prueba F global — Modelo 1
+
+La prueba F contrasta $H_0: \beta_1 = \cdots = \beta_{16} = 0$ vs. $H_1:$ al menos un
+$\beta_j \neq 0$.
+
+```{r anova-m1}
+anova(lm(log_precio ~ 1, data = df), m1)
+```
+
+La prueba F resulta altamente significativa (p < 0.001): el modelo en conjunto explica una
+proporción real de la variabilidad del precio.
+
+### Pruebas individuales de significancia — Modelo 1
+
+Del `summary(m1)` se identifican las variables con p-valor > 0.05 (no significativas al
+nivel $\alpha = 0.05$):
+
+- `habitaciones` (p = 0.606)
+- `administracion` (p = 0.176)
+- `antiguedad` (p = 0.239)
+- `remodelado` (p = 0.934)
+- `deposito` (p = 0.405)
+- `gas` (p = 0.385)
+- `parqueadero` (p = 0.619)
+
+### Validación de supuestos — Modelo 1
+
+#### Linealidad
+
+```{r linealidad-m1, fig.width=10, fig.height=5}
+# Residuales vs valores ajustados
+fit_m1 <- fitted(m1)
+res_m1  <- residuals(m1)
+
+ggplot(data.frame(fit = fit_m1, res = res_m1), aes(fit, res)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_point(alpha = 0.5) +
+  labs(x = "Valores ajustados", y = "Residuales",
+       title = "Residuales vs Ajustados — Modelo 1") +
+  theme_bw()
+```
+
+```{r cr-av-m1, fig.width=12, fig.height=8}
+# CR plots para verificar linealidad por predictor (solo variables continuas)
+par(mfrow = c(1, 1))
+car::crPlots(m1, ask = FALSE, smooth = TRUE,
+             main = "CR plots — Modelo 1", id = FALSE)
+```
+
+```{r reset-m1}
+cat("Prueba RESET de Ramsey (potencias 2 y 3):\n")
+print(lmtest::resettest(m1, power = 2:3))
+```
+
+#### Homocedasticidad
+
+```{r homoc-m1, fig.width=6, fig.height=4}
+plot(m1, which = 3)
+```
+
+```{r bp-m1}
+cat("Breusch-Pagan:\n")
+print(lmtest::bptest(m1))
+```
+
+#### Independencia de errores
+
+```{r indep-m1}
+cat("Durbin-Watson:\n")
+print(lmtest::dwtest(m1))
+```
+
+#### Normalidad de residuos
+
+```{r normalidad-m1}
+set.seed(42)
+idx_m1 <- sample(seq_along(res_m1), 300)
+
+cat("Shapiro-Wilk:\n")
+print(shapiro.test(res_m1[idx_m1]))
+
+cat("\nJarque-Bera:\n")
+print(tseries::jarque.bera.test(res_m1))
+
+cat("\nAnderson-Darling:\n")
+print(nortest::ad.test(res_m1))
+```
+
+```{r qq-m1, fig.width=5, fig.height=5}
+car::qqPlot(m1, simulate = TRUE, main = "Q-Q de residuales — Modelo 1")
+```
+
+### Multicolinealidad — VIF y número de condición
+
+```{r vif-m1}
+cat("VIF — Modelo 1:\n")
+print(car::vif(m1))
+
+cat("\nNúmero de condición (kappa):\n")
+print(kappa(model.matrix(m1)))
+```
+
+---
+
+## Modelo 2: log(precio) — Modelo reducido (modelo final)
+
+$$
+\log(\text{precio}_i) = \beta_0 + \beta_1\,\text{area}_i + \beta_2\,\text{banos}_i + \beta_3\,\text{garajes}_i + \beta_4\,\text{elevadores}_i + \beta_5\,\text{estrato}_i \\
++ \beta_6\,\text{porteria}_i + \beta_7\,\text{zona\_lav}_i + \beta_8\,\text{casa}_i + \beta_9\,\text{casa\_conjunto}_i + \varepsilon_i
+$$
+
+```{r m2}
+m2 <- lm(log_precio ~ area + banos + garajes + elevadores + estrato +
+           porteria + zona_lav + casa + casa_conjunto,
+         data = df)
+
+summary(m2)
+```
+
+### Prueba F parcial: modelo completo vs. modelo reducido
+
+```{r anova-m1-m2}
+anova(m2, m1)
+```
+
+La prueba F parcial no rechaza $H_0$ (p > 0.05): las variables eliminadas **no mejoran
+significativamente** el ajuste. El modelo reducido es preferible por parsimonia.
+
+### Intervalos de confianza — Modelo 2
+
+```{r confint-m2}
+confint(m2, level = 0.95)
+```
+
+### Validación de supuestos — Modelo 2 (modelo final)
+
+#### Linealidad
+
+```{r linealidad-m2, fig.width=10, fig.height=5}
+fit_m2 <- fitted(m2)
+res_m2  <- residuals(m2)
+
+ggplot(data.frame(fit = fit_m2, res = res_m2), aes(fit, res)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_point(alpha = 0.5) +
+  labs(x = "Valores ajustados", y = "Residuales",
+       title = "Residuales vs Ajustados — Modelo 2") +
+  theme_bw()
+```
+
+```{r cr-av-m2, fig.width=12, fig.height=8}
+par(mfrow = c(1, 1))
+car::crPlots(m2, ask = FALSE, smooth = TRUE,
+             main = "CR plots — Modelo 2", id = FALSE)
+```
+
+```{r reset-m2}
+cat("Prueba RESET de Ramsey (potencias 2 y 3):\n")
+print(lmtest::resettest(m2, power = 2:3))
+```
+
+#### Homocedasticidad
+
+```{r homoc-m2, fig.width=6, fig.height=4}
+plot(m2, which = 3)
+```
+
+```{r bp-m2}
+cat("Breusch-Pagan:\n")
+print(lmtest::bptest(m2))
+```
+
+#### Independencia de errores
+
+```{r indep-m2}
+cat("Durbin-Watson:\n")
+print(lmtest::dwtest(m2))
+```
+
+#### Normalidad de residuos
+
+```{r normalidad-m2}
+set.seed(42)
+idx_m2 <- sample(seq_along(res_m2), 300)
+
+cat("Shapiro-Wilk:\n")
+print(shapiro.test(res_m2[idx_m2]))
+
+cat("\nJarque-Bera:\n")
+print(tseries::jarque.bera.test(res_m2))
+
+cat("\nAnderson-Darling:\n")
+print(nortest::ad.test(res_m2))
+```
+
+```{r qq-m2, fig.width=5, fig.height=5}
+car::qqPlot(m2, simulate = TRUE, main = "Q-Q de residuales — Modelo 2")
+```
+
+### Multicolinealidad — VIF y número de condición
+
+```{r vif-m2}
+cat("VIF — Modelo 2:\n")
+print(car::vif(m2))
+
+cat("\nNúmero de condición (kappa):\n")
+print(kappa(model.matrix(m2)))
+```
+
+### Observaciones influyentes
+
+```{r influyentes-m2, fig.width=8, fig.height=6}
+n_m2 <- nobs(m2)
+p_m2 <- length(coef(m2))
+
+H      <- hatvalues(m2)
+cook   <- cooks.distance(m2)
+dff    <- dffits(m2)
+res_stud <- rstudent(m2)
+covr   <- covratio(m2)
+
+thr_h   <- 2 * p_m2 / n_m2
+thr_dff <- 2 * sqrt(p_m2 / n_m2)
+thr_dfb <- 2 / sqrt(n_m2)
+
+diag_tbl <- tibble::tibble(
+  obs      = seq_len(n_m2),
+  h_ii     = H,
+  rstudent = res_stud,
+  cookD    = cook,
+  dffits   = dff,
+  covratio = covr
+) %>%
+  mutate(
+    flag_h    = h_ii     > thr_h,
+    flag_rstu = abs(rstudent) > 2,
+    flag_cook = cookD    > max(1, 4 / n_m2),
+    flag_dff  = abs(dffits)   > thr_dff,
+    flag_covr = (covratio < (1 - 3 * p_m2 / n_m2)) |
+                (covratio > (1 + 3 * p_m2 / n_m2)),
+    any_flag  = flag_h | flag_rstu | flag_cook | flag_dff | flag_covr
+  )
+
+cat("Observaciones con al menos un indicador de influencia:\n")
+print(diag_tbl %>% filter(any_flag) %>%
+        arrange(desc(abs(rstudent))) %>% head(12))
+```
+
+```{r outlier-test-m2}
+cat("Prueba de outliers (Bonferroni):\n")
+print(car::outlierTest(m2))
+```
+
+```{r influence-plot-m2, fig.width=8, fig.height=6}
+car::influencePlot(
+  m2,
+  id   = list(method = "rstudent", n = 3),
+  main = "Influencia y apalancamiento — Modelo 2"
+)
+```
+
+---
+
+# Comparación de bondad de ajuste
+
+```{r comparacion}
+tabla_comp <- data.frame(
+  Modelo    = c("M0 — precio", "M1 — log(precio) completo", "M2 — log(precio) final"),
+  n         = c(nobs(m0), nobs(m1), nobs(m2)),
+  Variables = c(length(coef(m0)) - 1, length(coef(m1)) - 1, length(coef(m2)) - 1),
+  R2        = c(summary(m0)$r.squared,     summary(m1)$r.squared,     summary(m2)$r.squared),
+  R2_adj    = c(summary(m0)$adj.r.squared, summary(m1)$adj.r.squared, summary(m2)$adj.r.squared),
+  AIC       = c(AIC(m0), AIC(m1), AIC(m2)),
+  BIC       = c(BIC(m0), BIC(m1), BIC(m2))
+)
+
+round(tabla_comp, 4)
+```
+
+El Modelo 2 presenta el menor AIC y BIC entre los modelos con `log_precio`, y el mayor
+$\bar{R}^2$ ajustado, confirmándose como el mejor modelo: maximiza el ajuste mientras
+penaliza la complejidad innecesaria.
+
+---
+
+# Modelo final
+
+Dado que la variable dependiente es $\log(\text{precio})$, los coeficientes se interpretan
+como **semielasticidades**: un incremento unitario en $X_j$ genera un cambio de
+$(e^{\hat{\beta}_j} - 1) \times 100\%$ en el precio.
+
+```{r interpretacion}
+coefs <- coef(m2)[-1]
+efectos <- data.frame(
+  Variable   = names(coefs),
+  Beta       = round(coefs, 4),
+  Efecto_pct = round((exp(coefs) - 1) * 100, 2)
+)
+efectos
+```
+
+```{r plot-coeficientes, fig.width=8, fig.height=5}
+coef_df <- data.frame(
+  variable = names(coef(m2))[-1],
+  estimado = coef(m2)[-1],
+  lwr      = confint(m2)[-1, 1],
+  upr      = confint(m2)[-1, 2]
+)
+
+ggplot(coef_df, aes(x = estimado, y = reorder(variable, estimado))) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_errorbarh(aes(xmin = lwr, xmax = upr), height = 0.3, color = "#2C5F8A") +
+  geom_point(size = 3, color = "#2C5F8A") +
+  labs(title = "Coeficientes del Modelo Final con IC 95%",
+       x = "Coeficiente (efecto sobre log(precio))",
+       y = "") +
+  theme_bw()
+```
