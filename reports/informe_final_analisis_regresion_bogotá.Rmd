@@ -1,6 +1,6 @@
 ---
-title: "Determinantes del Precio de Inmuebles en Bogotá"
-author: "Felipe y Juan"
+title: "Determinantes del Precio de Venta de Inmuebles en Bogotá mediante Regresión Lineal Múltiple (2023)"
+author: "Juan David Nieto Dallos - Juan Felipe Rubiano Florez"
 date: "2026-03-14"
 output:
   pdf_document:
@@ -8,16 +8,10 @@ output:
     number_sections: true
 lang: es
 ---
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
 ```
-# Introducción
-
-La adquisición de vivienda representa uno de los mayores desafíos económicos para los hogares colombianos, El 40 % de los ciudadanos viven en ariendo. En ciudades como Bogotá, donde la oferta es amplia y heterogénea, identificar los factores que inciden en el precio de venta de un inmueble resulta de gran utilidad tanto para compradores que buscan tomar decisiones informadas como para vendedores e inversionistas que necesitan valorar sus propiedades de forma objetiva.
-
-El actual informe buscaa responder lapregunta: ¿Que factores influyen en mayor medida elprecio de venta de un inmueble en bogotá? Para esto implementamos un modelo de regresión lineal multiple que relaciona el precio con variables como el área, el estrato socioeconómico, el numero de baños y habitaciones,la antigüedad, la disponibilidad de garajes, entre otras.
-
-Los datos provienen del portal Kaggle (juandavsnchez/real-estate-housing-colombia-bogota) y fueron recolectados mediante web scraping de portales inmobiliarios colombianos en el año 2023. El dataset original contiene 585 registros; tras eliminar observaciones con valores faltantes en variables clave, se trabaja con 551 inmuebles. Las unidades estadísticas son inmuebles individuales — apartamentos, casas y casas en conjunto cerrado — ofertados en el mercado bogotano durante dicho periodo.
 
 ```{r carga-datos}
 library(tidyverse)
@@ -25,6 +19,9 @@ library(corrplot)
 library(car)
 library(lmtest)
 library(gridExtra)
+library(nortest)
+library(tseries)
+library(broom)
 
 df_raw <- read_csv("../data/raw/properties.csv")
 
@@ -54,6 +51,16 @@ df <- df_raw %>%
   )
 ```
 
+# Introducción y Preprocesamiento
+
+La adquisición de vivienda representa uno de los mayores desafíos económicos para los hogares colombianos. El 40% de los ciudadanos viven en arriendo. En ciudades como Bogotá, donde la oferta es amplia y heterogénea, identificar los factores que inciden en el precio de venta de un inmueble resulta de gran utilidad tanto para compradores que buscan tomar decisiones informadas como para vendedores e inversionistas que necesitan valorar sus propiedades de forma objetiva.
+
+El presente informe busca responder la pregunta: **¿Qué factores influyen en mayor medida en el precio de venta de un inmueble en Bogotá?** Para ello se implementa un modelo de regresión lineal múltiple que relaciona el precio con variables como el área, el estrato socioeconómico, el número de baños y habitaciones, la antigüedad, la disponibilidad de garajes, entre otras.
+
+Los datos provienen del portal Kaggle (juandavsnchez/real-estate-housing-colombia-bogota) y fueron recolectados mediante web scraping de portales inmobiliarios colombianos en el año 2023. El dataset original contiene 585 registros correspondientes a inmuebles individuales — apartamentos, casas y casas en conjunto cerrado — ofertados en el mercado bogotano durante dicho periodo.
+
+Como parte del preprocesamiento, se eliminaron los registros con valores faltantes en las variables estrato, remodelado y gas. Las variables categóricas fueron recodificadas como variables binarias (0/1): remodelado, portería 24 horas, zona de lavandería comunal, conexión a gas y parqueadero. Se crearon además dos variables indicadoras para el tipo de inmueble (casa y casa en conjunto cerrado), tomando apartamento como categoría de referencia. Tras este proceso de limpieza, se trabaja con **551 observaciones**.
+
 ## Variables del modelo
 
 La variable dependiente es el **precio de venta** del inmueble en pesos colombianos (COP). Dado que su distribución presenta un sesgo positivo pronunciado, se trabaja con su transformación logarítmica, $\log(\text{precio})$, como variable respuesta.
@@ -64,11 +71,10 @@ Las variables explicativas se clasifican en dos grupos:
 
 **Variables binarias (0/1):** si el inmueble fue remodelado, si cuenta con depósito, portería 24 horas, zona de lavandería comunal, conexión a gas, parqueadero, y dos indicadoras del tipo de inmueble (casa y casa en conjunto cerrado, siendo apartamento la categoría de referencia).
 
-
-
-# Análisis Exploratorio de Datos
+# Análisis Descriptivo
 
 ## Distribución de la variable dependiente
+
 ```{r dist-precio, fig.width=10, fig.height=4}
 par(mfrow = c(1, 2))
 
@@ -88,3 +94,513 @@ par(mfrow = c(1, 1))
 ```
 
 La distribución del precio en escala original presenta un sesgo positivo marcado: la mayoría de los inmuebles se concentran por debajo de los 400 millones de COP, con algunos valores extremos que superan los 1.000 millones. Al aplicar la transformación logarítmica, la distribución se aproxima a una forma simétrica, lo cual justifica el uso de $\log(\text{precio})$ como variable dependiente en el modelo de regresión.
+
+## Medidas de resumen
+
+```{r resumen-descriptivo}
+resumen <- df %>%
+  dplyr::select(precio, area, banos, garajes, administracion, antiguedad, elevadores, estrato) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Valor") %>%
+  group_by(Variable) %>%
+  summarise(
+    Media    = round(mean(Valor, na.rm = TRUE), 2),
+    Mediana  = round(median(Valor, na.rm = TRUE), 2),
+    Desv.Std = round(sd(Valor, na.rm = TRUE), 2),
+    Min      = round(min(Valor, na.rm = TRUE), 2),
+    Max      = round(max(Valor, na.rm = TRUE), 2),
+    .groups  = "drop"
+  )
+
+knitr::kable(resumen, caption = "Estadísticas descriptivas de las variables numéricas")
+```
+
+## Gráficos de dispersión: variable dependiente vs. explicativas
+
+```{r scatter-area, fig.width=7, fig.height=4}
+ggplot(df, aes(x = area, y = log_precio)) +
+  geom_point(alpha = 0.4, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) vs. Área",
+       x = "Área (m²)", y = "log(Precio)") +
+  theme_bw()
+```
+
+Se observa una relación lineal positiva entre el área y el precio: a mayor superficie, mayor precio de venta. La nube de puntos es bastante homogénea, lo que sugiere que la relación lineal es una buena aproximación.
+
+```{r scatter-estrato, fig.width=7, fig.height=4}
+ggplot(df, aes(x = estrato, y = log_precio)) +
+  geom_point(alpha = 0.4, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) vs. Estrato",
+       x = "Estrato socioeconómico", y = "log(Precio)") +
+  theme_bw()
+```
+
+El estrato presenta una de las correlaciones más altas con el precio. Cada nivel adicional de estrato se asocia con un incremento sustancial en el precio, reflejando las diferencias socioeconómicas espaciales de Bogotá.
+
+```{r scatter-banos-garajes, fig.width=10, fig.height=4}
+p1 <- ggplot(df, aes(x = banos, y = log_precio)) +
+  geom_point(alpha = 0.4, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) vs. Baños",
+       x = "Número de baños", y = "log(Precio)") +
+  theme_bw()
+
+p2 <- ggplot(df, aes(x = garajes, y = log_precio)) +
+  geom_point(alpha = 0.4, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) vs. Garajes",
+       x = "Número de garajes", y = "log(Precio)") +
+  theme_bw()
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+Tanto baños como garajes muestran relaciones lineales positivas claras con el precio. Los garajes tienen una pendiente especialmente pronunciada, dado el alto valor del parqueo en Bogotá.
+
+```{r scatter-admin-antiguedad, fig.width=10, fig.height=4}
+p3 <- ggplot(df, aes(x = administracion, y = log_precio)) +
+  geom_point(alpha = 0.4, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) vs. Administración",
+       x = "Cuota de administración (COP)", y = "log(Precio)") +
+  theme_bw()
+
+p4 <- ggplot(df, aes(x = antiguedad, y = log_precio)) +
+  geom_point(alpha = 0.4, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) vs. Antigüedad",
+       x = "Años de construcción", y = "log(Precio)") +
+  theme_bw()
+
+grid.arrange(p3, p4, ncol = 2)
+```
+
+La administración presenta una relación positiva pero con alta dispersión en valores extremos. La antigüedad muestra una relación positiva débil, lo que sugiere que por sí sola no es un predictor fuerte del precio.
+
+## Validación de relaciones lineales vs. no lineales
+
+Para detectar si alguna variable presenta una relación no lineal con $\log(\text{precio})$, se superponen la recta de regresión lineal (roja) y una curva LOESS no paramétrica (azul punteada). Si ambas coinciden, la relación es lineal; si la curva LOESS se desvía de la recta, hay evidencia de no linealidad.
+
+```{r lineal-vs-nolineal, fig.width=12, fig.height=10}
+vars_check <- c("area", "banos", "garajes", "administracion",
+                "antiguedad", "elevadores", "estrato")
+
+plots_nl <- lapply(vars_check, function(xv) {
+  ggplot(df, aes(x = .data[[xv]], y = log_precio)) +
+    geom_point(alpha = 0.3, size = 1, color = "gray60") +
+    geom_smooth(method = "lm",    formula = y ~ x, se = FALSE,
+                color = "#C0392B", linewidth = 1.2, linetype = "solid") +
+    geom_smooth(method = "loess", formula = y ~ x, se = FALSE,
+                color = "#2C5F8A", linewidth = 1.2, linetype = "dashed") +
+    labs(title = paste("log(Precio) ~", xv),
+         x = xv, y = "log(Precio)",
+         caption = "Rojo: lineal  |  Azul: LOESS") +
+    theme_bw(base_size = 9)
+})
+
+grid.arrange(grobs = plots_nl, ncol = 3)
+```
+
+La curva LOESS sigue de cerca la recta lineal en área, estrato, baños y garajes, confirmando relaciones esencialmente lineales. En administración y antigüedad se observan pequeñas desviaciones en los extremos, pero sin patrones sistemáticos que invaliden el supuesto de linealidad. En conclusión, no se requieren términos cuadráticos ni transformaciones adicionales en las variables explicativas.
+
+## Validación de transformaciones de variables
+
+Se evalúa si las variables con mayor dispersión se benefician de una transformación logarítmica, comparando la escala original versus la escala logarítmica.
+
+```{r transformaciones, fig.width=12, fig.height=5}
+p_area_orig <- ggplot(df, aes(x = area, y = log_precio)) +
+  geom_point(alpha = 0.3, size = 1, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) ~ área (original)",
+       x = "Área (m²)", y = "log(Precio)") +
+  theme_bw()
+
+p_area_log <- ggplot(df, aes(x = log(area), y = log_precio)) +
+  geom_point(alpha = 0.3, size = 1, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) ~ log(área)",
+       x = "log(Área)", y = "log(Precio)") +
+  theme_bw()
+
+df_adm <- df %>% filter(administracion > 0)
+
+p_adm_orig <- ggplot(df_adm, aes(x = administracion, y = log_precio)) +
+  geom_point(alpha = 0.3, size = 1, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) ~ administración (original)",
+       x = "Administración (COP)", y = "log(Precio)") +
+  theme_bw()
+
+p_adm_log <- ggplot(df_adm, aes(x = log(administracion), y = log_precio)) +
+  geom_point(alpha = 0.3, size = 1, color = "#2C5F8A") +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#C0392B") +
+  labs(title = "log(Precio) ~ log(administración)",
+       x = "log(Administración)", y = "log(Precio)") +
+  theme_bw()
+
+grid.arrange(p_area_orig, p_area_log, p_adm_orig, p_adm_log, ncol = 4)
+```
+
+Para el área, la relación en escala original ya es lineal; la versión logarítmica produce una nube ligeramente más compacta pero sin mejora sustancial. Para la administración, la transformación logarítmica reduce la dispersión producida por valores extremos. Sin embargo, dado que la relación lineal es aceptable en ambos casos, se mantienen las variables en escala original para preservar la interpretabilidad directa de los coeficientes.
+
+# Análisis de Correlación
+
+```{r scatter-entre-x, fig.width=10, fig.height=8}
+df %>%
+  dplyr::select(area, banos, garajes, administracion, antiguedad,
+                elevadores, estrato) %>%
+  pairs(pch = 20, col = adjustcolor("#2C5F8A", alpha.f = 0.3),
+        main = "Dispersión entre variables explicativas numéricas")
+```
+
+Se observan asociaciones positivas moderadas entre área y baños (inmuebles más grandes tienen más baños), entre garajes y estrato (estratos altos tienen más garajes), y entre administración y estrato. Ninguna correlación supera 0.8, lo que anticipa la ausencia de multicolinealidad grave entre los predictores.
+
+```{r correlaciones, fig.width=7, fig.height=7}
+vars_num <- c("log_precio", "area", "banos", "garajes",
+              "administracion", "antiguedad", "elevadores", "estrato")
+
+corr_mat <- cor(df %>% dplyr::select(all_of(vars_num)), use = "complete.obs")
+
+par(mar = c(0, 0, 2, 0))
+corrplot(corr_mat,
+         method      = "color",
+         type        = "upper",
+         addCoef.col = "black",
+         number.cex  = 0.75,
+         tl.col      = "black",
+         tl.srt      = 45,
+         col         = colorRampPalette(c("#C0392B", "white", "#2C5F8A"))(200))
+title("Correlaciones de Pearson")
+```
+
+Las correlaciones más altas con $\log(\text{precio})$ corresponden a estrato ($r = 0.82$), área ($r = 0.81$), garajes ($r = 0.81$) y baños ($r = 0.72$). Estas cuatro variables serán los predictores más relevantes en el modelo. La antigüedad y los elevadores presentan correlaciones más bajas, lo que sugiere que su aporte individual al modelo será menor. Adicionalmente, este análisis permite anticipar posibles problemas de multicolinealidad: las correlaciones más altas entre predictores se dan entre administración y área ($r = 0.73$) y entre garajes y estrato ($r = 0.69$), ambas por debajo del umbral de 0.8.
+
+# Verificación de Supuestos y Estimación de Modelos
+
+El proceso de modelado sigue un enfoque iterativo: se parte de un modelo con el precio sin transformar (Modelo 0) como referencia, luego se estima un modelo completo con $\log(\text{precio})$ (Modelo 1), y finalmente se reduce eliminando las variables no significativas (Modelo 2). En cada etapa se verifican los supuestos del modelo de regresión lineal: normalidad de los residuos (Shapiro-Wilk, Jarque-Bera, Anderson-Darling), homocedasticidad (Breusch-Pagan), linealidad (gráfico de residuales vs. ajustados, prueba RESET de Ramsey) e independencia de errores (Durbin-Watson).
+
+$$
+\log(\text{precio}_i) = \beta_0 + \beta_1\,X_{1i} + \beta_2\,X_{2i} + \cdots + \beta_k\,X_{ki} + \varepsilon_i, \quad \varepsilon_i \sim \mathcal{N}(0, \sigma^2)
+$$
+
+## Modelo 0: Precio sin transformar (referencia)
+
+Se estima un modelo con el precio en escala original para verificar si la transformación logarítmica es necesaria.
+
+```{r m0, results='hide'}
+m0 <- lm(precio ~ area + habitaciones + banos + garajes + administracion +
+           antiguedad + elevadores + estrato +
+           remodelado + deposito + porteria + zona_lav + gas +
+           parqueadero + casa + casa_conjunto,
+         data = df)
+
+res_m0 <- residuals(m0)
+set.seed(42)
+idx_m0 <- sample(seq_along(res_m0), 300)
+sw_m0 <- shapiro.test(res_m0[idx_m0])
+bp_m0 <- lmtest::bptest(m0)
+s_m0  <- summary(m0)
+```
+
+```{r supuestos-m0, fig.width=10, fig.height=8}
+par(mfrow = c(2, 2))
+plot(m0, main = "Diagnóstico — Modelo 0 (precio)")
+par(mfrow = c(1, 1))
+```
+
+Los gráficos de diagnóstico revelan problemas severos. La prueba de Shapiro-Wilk arroja $W = `r round(sw_m0$statistic, 4)`$ con p-valor $< 0.001$, rechazando la normalidad de los residuos. La prueba de Breusch-Pagan obtiene $BP = `r round(bp_m0$statistic, 2)`$ con p-valor $< 0.001$, rechazando la homocedasticidad. Dado que el Modelo 0 viola ambos supuestos, sus inferencias son inválidas y se confirma la necesidad de aplicar la transformación logarítmica al precio.
+
+## Modelo 1: $\log(\text{precio})$ — Modelo completo
+
+Se estima el modelo con las 16 variables explicativas disponibles.
+
+```{r m1, results='hide'}
+m1 <- lm(log_precio ~ area + habitaciones + banos + garajes + administracion +
+           antiguedad + elevadores + estrato +
+           remodelado + deposito + porteria + zona_lav + gas +
+           parqueadero + casa + casa_conjunto,
+         data = df)
+
+s_m1 <- summary(m1)
+```
+
+```{r m1-tabla}
+knitr::kable(tidy(m1), digits = 4, caption = "Coeficientes estimados — Modelo 1",
+             col.names = c("Variable", "Estimación", "Error Std.", "t", "p-valor"))
+```
+
+El modelo completo obtiene un $R^2$ ajustado de $`r round(s_m1$adj.r.squared, 4)`$, lo que indica que explica aproximadamente el $`r round(s_m1$adj.r.squared * 100, 1)`\%$ de la variabilidad del logaritmo del precio.
+
+### Prueba F global
+
+La prueba F contrasta $H_0: \beta_1 = \cdots = \beta_{16} = 0$ frente a $H_1:$ al menos un $\beta_j \neq 0$.
+
+```{r anova-m1, results='hide'}
+anova_m1 <- anova(lm(log_precio ~ 1, data = df), m1)
+```
+
+La prueba F resulta altamente significativa ($F = `r round(anova_m1$F[2], 1)`$, $p < 0.001$), lo que indica que el modelo en su conjunto explica una proporción real de la variabilidad del precio.
+
+### Pruebas individuales de significancia
+
+Del cuadro de coeficientes se identifican las variables con p-valor mayor a 0.05, es decir, no significativas al nivel $\alpha = 0.05$: habitaciones ($p = 0.606$), administración ($p = 0.176$), antigüedad ($p = 0.239$), remodelado ($p = 0.934$), depósito ($p = 0.405$), gas ($p = 0.385$) y parqueadero ($p = 0.619$). Estas siete variables serán eliminadas en el modelo reducido.
+
+### Validación de supuestos — Modelo 1
+
+#### Linealidad
+
+```{r linealidad-m1, fig.width=8, fig.height=4, fig.align='center', out.width="90%"}
+fit_m1 <- fitted(m1)
+res_m1 <- residuals(m1)
+
+ggplot(data.frame(fit = fit_m1, res = res_m1), aes(fit, res)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_point(alpha = 0.5) +
+  labs(x = "Valores ajustados", y = "Residuales",
+       title = "Residuales vs Ajustados — Modelo 1") +
+  theme_bw()
+```
+
+```{r reset-m1, results='hide'}
+reset_m1 <- lmtest::resettest(m1, power = 2:3)
+```
+
+El gráfico de residuales vs. valores ajustados no muestra patrones sistemáticos claros. La prueba RESET de Ramsey ($p = `r format.pval(reset_m1$p.value, digits = 3)`$) sugiere que podrían existir componentes no lineales menores, pero el gráfico no evidencia una violación grave del supuesto.
+
+#### Homocedasticidad
+
+```{r homoc-m1, fig.width=10, fig.height=4, fig.align='center', out.width="90%"}
+par(mar = c(5, 5, 3, 2))
+plot(m1, which = 3, sub.caption = "", caption = "")
+```
+
+```{r bp-m1, results='hide'}
+bp_m1 <- lmtest::bptest(m1)
+```
+
+La prueba de Breusch-Pagan arroja $BP = `r round(bp_m1$statistic, 2)`$ con p-valor $= `r round(bp_m1$p.value, 4)`$. Si bien el p-valor es inferior a 0.05, la violación no es tan severa como en el Modelo 0.
+
+#### Independencia de errores
+
+```{r indep-m1, results='hide'}
+dw_m1 <- lmtest::dwtest(m1)
+```
+
+La prueba de Durbin-Watson obtiene $DW = `r round(dw_m1$statistic, 4)`$ con p-valor $= `r round(dw_m1$p.value, 2)`$. No se rechaza la hipótesis nula de independencia de errores, lo cual es coherente con datos de corte transversal.
+
+#### Normalidad de residuos
+
+```{r qq-m1, fig.width=5, fig.height=5, fig.align='center', results='hide'}
+car::qqPlot(m1, simulate = TRUE, main = "Q-Q de residuales — Modelo 1")
+```
+
+```{r normalidad-m1, results='hide'}
+set.seed(42)
+idx_m1 <- sample(seq_along(res_m1), 300)
+sw_m1 <- shapiro.test(res_m1[idx_m1])
+jb_m1 <- tseries::jarque.bera.test(res_m1)
+ad_m1 <- nortest::ad.test(res_m1)
+```
+
+Las tres pruebas de normalidad no rechazan $H_0$: Shapiro-Wilk ($W = `r round(sw_m1$statistic, 4)`$, $p = `r round(sw_m1$p.value, 4)`$), Jarque-Bera ($p = `r round(jb_m1$p.value, 4)`$) y Anderson-Darling ($p = `r round(ad_m1$p.value, 4)`$). Los residuos del Modelo 1 se distribuyen de forma aproximadamente normal.
+
+### Multicolinealidad
+
+```{r vif-m1, results='hide'}
+vif_m1 <- car::vif(m1)
+kappa_m1 <- kappa(model.matrix(m1))
+```
+
+Todos los factores de inflación de varianza (VIF) son inferiores a 5, con un máximo de $`r round(max(vif_m1), 2)`$ para la variable área. Esto indica que no existe multicolinealidad grave entre los predictores.
+
+## Modelo 2: $\log(\text{precio})$ — Modelo reducido (modelo final)
+
+Se eliminan las siete variables no significativas del Modelo 1. El modelo reducido queda:
+
+$$
+\log(\text{precio}_i) = \beta_0 + \beta_1\,\text{area}_i + \beta_2\,\text{banos}_i + \beta_3\,\text{garajes}_i + \beta_4\,\text{elevadores}_i + \beta_5\,\text{estrato}_i + \beta_6\,\text{porteria}_i + \beta_7\,\text{zona\_lav}_i + \beta_8\,\text{casa}_i + \beta_9\,\text{casa\_conjunto}_i + \varepsilon_i
+$$
+
+```{r m2, results='hide'}
+m2 <- lm(log_precio ~ area + banos + garajes + elevadores + estrato +
+           porteria + zona_lav + casa + casa_conjunto,
+         data = df)
+
+s_m2 <- summary(m2)
+```
+
+```{r m2-tabla}
+knitr::kable(tidy(m2), digits = 4, caption = "Coeficientes estimados — Modelo 2 (final)",
+             col.names = c("Variable", "Estimación", "Error Std.", "t", "p-valor"))
+```
+
+El modelo reducido obtiene un $R^2$ ajustado de $`r round(s_m2$adj.r.squared, 4)`$, prácticamente igual al del modelo completo ($`r round(s_m1$adj.r.squared, 4)`$), lo que confirma que las variables eliminadas no aportaban poder explicativo.
+
+### Prueba F parcial: modelo completo vs. modelo reducido
+
+```{r anova-m1-m2, results='hide'}
+anova_parcial <- anova(m2, m1)
+```
+
+La prueba F parcial obtiene $F = `r round(anova_parcial$F[2], 3)`$ con p-valor $= `r round(anova_parcial$"Pr(>F)"[2], 4)`$. No se rechaza $H_0$, lo que confirma que las variables eliminadas no mejoran significativamente el ajuste. El modelo reducido es preferible por parsimonia.
+
+### Intervalos de confianza — Modelo 2
+
+```{r confint-m2}
+knitr::kable(confint(m2, level = 0.95), digits = 4,
+             caption = "Intervalos de confianza al 95% — Modelo 2")
+```
+
+### Validación de supuestos — Modelo 2 (modelo final)
+
+#### Linealidad
+
+```{r linealidad-m2, fig.width=8, fig.height=4, fig.align='center', out.width="90%"}
+fit_m2 <- fitted(m2)
+res_m2 <- residuals(m2)
+
+ggplot(data.frame(fit = fit_m2, res = res_m2), aes(fit, res)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_point(alpha = 0.5) +
+  labs(x = "Valores ajustados", y = "Residuales",
+       title = "Residuales vs Ajustados — Modelo 2") +
+  theme_bw()
+```
+
+```{r reset-m2, results='hide'}
+reset_m2 <- lmtest::resettest(m2, power = 2:3)
+```
+
+La prueba RESET de Ramsey obtiene $p = `r format.pval(reset_m2$p.value, digits = 3)`$. El gráfico de residuales vs. ajustados no muestra patrones evidentes de no linealidad.
+
+#### Homocedasticidad
+
+```{r homoc-m2, fig.width=10, fig.height=4, fig.align='center', out.width="90%"}
+par(mar = c(5, 5, 3, 2))
+plot(m2, which = 3, sub.caption = "", caption = "")
+```
+
+```{r bp-m2, results='hide'}
+bp_m2 <- lmtest::bptest(m2)
+```
+
+La prueba de Breusch-Pagan arroja $BP = `r round(bp_m2$statistic, 2)`$ con p-valor $= `r round(bp_m2$p.value, 4)`$.
+
+#### Independencia de errores
+
+```{r indep-m2, results='hide'}
+dw_m2 <- lmtest::dwtest(m2)
+```
+
+La prueba de Durbin-Watson obtiene $DW = `r round(dw_m2$statistic, 4)`$ con p-valor $= `r round(dw_m2$p.value, 2)`$. No se rechaza la independencia de errores.
+
+#### Normalidad de residuos
+
+```{r qq-m2, fig.width=5, fig.height=5, fig.align='center', results='hide'}
+car::qqPlot(m2, simulate = TRUE, main = "Q-Q de residuales — Modelo 2")
+```
+
+```{r normalidad-m2, results='hide'}
+set.seed(42)
+idx_m2 <- sample(seq_along(res_m2), 300)
+sw_m2 <- shapiro.test(res_m2[idx_m2])
+jb_m2 <- tseries::jarque.bera.test(res_m2)
+ad_m2 <- nortest::ad.test(res_m2)
+```
+
+Las pruebas de normalidad arrojan: Shapiro-Wilk ($W = `r round(sw_m2$statistic, 4)`$, $p = `r round(sw_m2$p.value, 4)`$), Jarque-Bera ($p = `r round(jb_m2$p.value, 4)`$) y Anderson-Darling ($p = `r round(ad_m2$p.value, 4)`$). Los residuos se distribuyen de forma aproximadamente normal.
+
+### Multicolinealidad
+
+```{r vif-m2, results='hide'}
+vif_m2 <- car::vif(m2)
+```
+
+Todos los VIF del Modelo 2 son inferiores a 5, con un máximo de $`r round(max(vif_m2), 2)`$. No existe evidencia de multicolinealidad.
+
+### Observaciones influyentes
+
+```{r influence-plot-m2, fig.width=8, fig.height=6, results='hide'}
+car::influencePlot(
+  m2,
+  id   = list(method = "rstudent", n = 3),
+  main = "Influencia y apalancamiento — Modelo 2"
+)
+```
+
+```{r outlier-m2, results='hide'}
+outlier_m2 <- car::outlierTest(m2)
+```
+
+La prueba de Bonferroni para outliers identifica la observación `r names(outlier_m2$rstudent)` como potencialmente influyente (residuo estudentizado $= `r round(outlier_m2$rstudent, 2)`$, p ajustado $= `r round(outlier_m2$bonf.p, 4)`$). Sin embargo, al examinar el gráfico de influencia, ninguna observación combina simultáneamente alto apalancamiento y residuo extremo, por lo que se decide conservar todas las observaciones.
+
+# Comparación de bondad de ajuste
+
+```{r comparacion}
+tabla_comp <- data.frame(
+  Modelo    = c("M0 — precio", "M1 — log(precio) completo", "M2 — log(precio) final"),
+  n         = c(nobs(m0), nobs(m1), nobs(m2)),
+  Variables = c(length(coef(m0)) - 1, length(coef(m1)) - 1, length(coef(m2)) - 1),
+  R2        = c(summary(m0)$r.squared,     summary(m1)$r.squared,     summary(m2)$r.squared),
+  R2_adj    = c(summary(m0)$adj.r.squared, summary(m1)$adj.r.squared, summary(m2)$adj.r.squared),
+  AIC       = c(AIC(m0), AIC(m1), AIC(m2)),
+  BIC       = c(BIC(m0), BIC(m1), BIC(m2))
+)
+
+knitr::kable(tabla_comp %>% mutate(across(where(is.numeric), ~round(.x, 4))),
+             caption = "Comparación de bondad de ajuste entre modelos")
+```
+
+El Modelo 2 presenta el menor AIC y BIC entre los modelos con $\log(\text{precio})$, y un $R^2$ ajustado prácticamente igual al del modelo completo. Esto lo confirma como el mejor modelo: maximiza el ajuste mientras penaliza la complejidad innecesaria.
+
+# Modelo Final: Interpretación de Coeficientes
+
+Dado que la variable dependiente es $\log(\text{precio})$, los coeficientes se interpretan como semielasticidades: un incremento unitario en $X_j$ genera un cambio aproximado de $(e^{\hat{\beta}_j} - 1) \times 100\%$ en el precio. La ecuación del modelo final estimado es:
+
+$$
+\log(\text{precio}_i) = \hat{\beta}_0 + 0.0073\,\text{area}_i + 0.1210\,\text{banos}_i + 0.1805\,\text{garajes}_i + 0.0718\,\text{elevadores}_i + 0.1675\,\text{estrato}_i - 0.0705\,\text{porteria}_i + 0.0560\,\text{zona\_lav}_i + 0.1833\,\text{casa}_i + 0.0934\,\text{casa\_conjunto}_i
+$$
+
+```{r interpretacion}
+coefs <- coef(m2)[-1]
+efectos <- data.frame(
+  Variable   = names(coefs),
+  Beta       = round(coefs, 4),
+  Efecto_pct = round((exp(coefs) - 1) * 100, 2)
+)
+
+knitr::kable(efectos, caption = "Interpretación de coeficientes — Modelo Final",
+             col.names = c("Variable", "Coeficiente", "Efecto % sobre precio"),
+             row.names = FALSE)
+```
+
+```{r plot-coeficientes, fig.width=8, fig.height=5}
+coef_df <- data.frame(
+  variable = names(coef(m2))[-1],
+  estimado = coef(m2)[-1],
+  lwr      = confint(m2)[-1, 1],
+  upr      = confint(m2)[-1, 2]
+)
+
+ggplot(coef_df, aes(x = estimado, y = reorder(variable, estimado))) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_errorbarh(aes(xmin = lwr, xmax = upr), height = 0.3, color = "#2C5F8A") +
+  geom_point(size = 3, color = "#2C5F8A") +
+  labs(title = "Coeficientes del Modelo Final con IC 95%",
+       x = "Coeficiente (efecto sobre log(precio))",
+       y = "") +
+  theme_bw()
+```
+
+Los resultados muestran que el estrato socioeconómico, la disponibilidad de garajes, el tipo de inmueble (casa vs. apartamento) y el número de baños son los factores con mayor incidencia sobre el precio de venta. El área, si bien significativa, tiene un efecto unitario menor dado que se mide en metros cuadrados individuales.
+
+# Conclusiones
+
+El modelo de regresión lineal múltiple estimado permite responder la pregunta de investigación planteada. Los factores que más influyen en el precio de venta de un inmueble en Bogotá son el estrato socioeconómico, que incrementa el precio en aproximadamente un 18.2% por cada nivel adicional; el tipo de inmueble, siendo las casas aproximadamente un 20.1% más costosas que los apartamentos manteniendo las demás variables constantes; la disponibilidad de garajes, con un efecto de +19.8% por garaje adicional; y el número de baños, con +12.9% por baño adicional.
+
+El modelo final (Modelo 2) con 9 variables explicativas logra un $R^2$ ajustado de $`r round(s_m2$adj.r.squared, 4)`$, explicando aproximadamente el $`r round(s_m2$adj.r.squared * 100, 1)`\%$ de la variabilidad del precio. La eliminación de siete variables no significativas — habitaciones, administración, antigüedad, remodelado, depósito, gas y parqueadero — no redujo el poder explicativo del modelo, confirmando el principio de parsimonia. La prueba F parcial entre el modelo completo y el reducido no rechazó la hipótesis nula, validando formalmente esta decisión.
+
+En cuanto a la validación de supuestos, el Modelo 2 cumple satisfactoriamente con normalidad de residuos, independencia de errores y ausencia de multicolinealidad. La prueba de Breusch-Pagan arroja un p-valor marginalmente no significativo, lo que sugiere que la homocedasticidad se cumple de forma razonable tras la transformación logarítmica. La prueba RESET de Ramsey detecta posibles componentes no lineales, lo cual constituye una limitación del modelo que podría abordarse en trabajos futuros mediante la inclusión de términos polinómicos o interacciones entre variables.
+
+Estos hallazgos son coherentes con la realidad del mercado inmobiliario bogotano, donde la estratificación socioeconómica determina en gran medida la valorización del suelo y, por tanto, el precio de los inmuebles. Es importante recordar que, dado que los datos fueron obtenidos de aplicaciones inmobiliarias cuyo uso en Colombia no es tan extendido, el dataset puede presentar un sesgo hacia propiedades de mayor valor, lo cual debe tenerse en cuenta al generalizar estos resultados.
