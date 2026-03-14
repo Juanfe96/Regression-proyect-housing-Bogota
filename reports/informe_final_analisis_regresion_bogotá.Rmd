@@ -1,0 +1,90 @@
+---
+title: "Determinantes del Precio de Inmuebles en Bogotá"
+author: "Felipe y Juan"
+date: "2026-03-14"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+lang: es
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+# Introducción
+
+La adquisición de vivienda representa uno de los mayores desafíos económicos para los hogares colombianos, El 40 % de los ciudadanos viven en ariendo. En ciudades como Bogotá, donde la oferta es amplia y heterogénea, identificar los factores que inciden en el precio de venta de un inmueble resulta de gran utilidad tanto para compradores que buscan tomar decisiones informadas como para vendedores e inversionistas que necesitan valorar sus propiedades de forma objetiva.
+
+El actual informe buscaa responder lapregunta: ¿Que factores influyen en mayor medida elprecio de venta de un inmueble en bogotá? Para esto implementamos un modelo de regresión lineal multiple que relaciona el precio con variables como el área, el estrato socioeconómico, el numero de baños y habitaciones,la antigüedad, la disponibilidad de garajes, entre otras.
+
+Los datos provienen del portal Kaggle (juandavsnchez/real-estate-housing-colombia-bogota) y fueron recolectados mediante web scraping de portales inmobiliarios colombianos en el año 2023. El dataset original contiene 585 registros; tras eliminar observaciones con valores faltantes en variables clave, se trabaja con 551 inmuebles. Las unidades estadísticas son inmuebles individuales — apartamentos, casas y casas en conjunto cerrado — ofertados en el mercado bogotano durante dicho periodo.
+
+```{r carga-datos}
+library(tidyverse)
+library(corrplot)
+library(car)
+library(lmtest)
+library(gridExtra)
+
+df_raw <- read_csv("../data/raw/properties.csv")
+
+df <- df_raw %>%
+  dplyr::select(-conjunto, -direccion, -nombre, -descripcion, -barrio) %>%
+  mutate(
+    remodelado = na_if(remodelado, ""),
+    gas        = na_if(gas, "")
+  ) %>%
+  filter(!is.na(estrato), !is.na(remodelado), !is.na(gas)) %>%
+  mutate(
+    remodelado    = ifelse(remodelado  == "Si",  1L, 0L),
+    deposito      = as.integer(deposito),
+    porteria      = ifelse(porteria    == "24 hrs", 1L, 0L),
+    zona_lav      = ifelse(zona_de_lavanderia == "Comunal", 1L, 0L),
+    gas           = ifelse(gas         == "Si",  1L, 0L),
+    parqueadero   = ifelse(parqueadero == "Si",  1L, 0L),
+    casa          = ifelse(tipo_de_inmueble == "Casa", 1L, 0L),
+    casa_conjunto = ifelse(tipo_de_inmueble == "casa con conjunto cerrado", 1L, 0L),
+    log_precio    = log(precio)
+  ) %>%
+  dplyr::select(-zona_de_lavanderia, -tipo_de_inmueble) %>%
+  rename(
+    area           = `área`,
+    banos          = `baños`,
+    administracion = `administración`
+  )
+```
+
+## Variables del modelo
+
+La variable dependiente es el **precio de venta** del inmueble en pesos colombianos (COP). Dado que su distribución presenta un sesgo positivo pronunciado, se trabaja con su transformación logarítmica, $\log(\text{precio})$, como variable respuesta.
+
+Las variables explicativas se clasifican en dos grupos:
+
+**Variables continuas:** área del inmueble en metros cuadrados, número de habitaciones, número de baños, número de garajes, cuota mensual de administración en COP, antigüedad en años, número de ascensores en el edificio y estrato socioeconómico (escala de 1 a 6).
+
+**Variables binarias (0/1):** si el inmueble fue remodelado, si cuenta con depósito, portería 24 horas, zona de lavandería comunal, conexión a gas, parqueadero, y dos indicadoras del tipo de inmueble (casa y casa en conjunto cerrado, siendo apartamento la categoría de referencia).
+
+
+
+# Análisis Exploratorio de Datos
+
+## Distribución de la variable dependiente
+```{r dist-precio, fig.width=10, fig.height=4}
+par(mfrow = c(1, 2))
+
+hist(df$precio / 1e6,
+     main = "Distribución del Precio",
+     xlab = "Precio (millones COP)",
+     ylab = "Frecuencia",
+     col  = "#2C5F8A", border = "white", breaks = 35)
+
+hist(df$log_precio,
+     main = "Distribución de log(Precio)",
+     xlab = "log(Precio)",
+     ylab = "Frecuencia",
+     col  = "#E07B39", border = "white", breaks = 35)
+
+par(mfrow = c(1, 1))
+```
+
+La distribución del precio en escala original presenta un sesgo positivo marcado: la mayoría de los inmuebles se concentran por debajo de los 400 millones de COP, con algunos valores extremos que superan los 1.000 millones. Al aplicar la transformación logarítmica, la distribución se aproxima a una forma simétrica, lo cual justifica el uso de $\log(\text{precio})$ como variable dependiente en el modelo de regresión.

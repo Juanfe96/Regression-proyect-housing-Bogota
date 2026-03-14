@@ -44,8 +44,7 @@ library(corrplot)
 ```
 
 ```{r carga-datos}
-df_raw <- read_csv("properties.csv")
-
+df_raw <- read_csv("C:/Users/felip/Regression-proyect-housing-Bogota/data/raw/properties.csv")
 summary(df_raw)
 ```
 
@@ -699,7 +698,8 @@ tabla_comp <- data.frame(
   BIC       = c(BIC(m0), BIC(m1), BIC(m2))
 )
 
-round(tabla_comp, 4)
+tabla_comp %>%
+  mutate(across(where(is.numeric), ~round(.x, 4)))
 ```
 
 El Modelo 2 presenta el menor AIC y BIC entre los modelos con `log_precio`, y el mayor
